@@ -259,29 +259,35 @@ body[data-mode="live"] .file-only { display: none !important; }
   height: 120px;
   display: flex; align-items: center; justify-content: center;
 }
+.eq-slider-wrap::before {
+  content: '';
+  position: absolute;
+  left: 50%; transform: translateX(-50%);
+  width: 1px; height: 100%;
+  background: var(--border);
+}
 input.vslider {
   writing-mode: vertical-lr;
   direction: rtl;
   -webkit-appearance: slider-vertical;
   appearance: slider-vertical;
-  width: 28px; height: 120px;
+  width: 28px; height: 110px;
   cursor: pointer; background: transparent; outline: none;
 }
 input.vslider::-webkit-slider-runnable-track {
-  width: 5px;
-  background: var(--thumb, var(--cyan));
-  border-radius: 3px;
-  box-shadow: 0 0 6px var(--thumb, var(--cyan));
+  width: 3px;
+  background: var(--panel2);
+  border-radius: 2px;
 }
 input.vslider::-webkit-slider-thumb {
   -webkit-appearance: none;
   width: 18px; height: 18px;
-  background: var(--thumb, var(--cyan)); border-radius: 50%;
+  background: var(--cyan); border-radius: 50%;
   border: 2px solid #fff;
-  box-shadow: 0 0 var(--glow, 8px) var(--thumb, var(--cyan));
+  box-shadow: 0 0 7px var(--cyan);
 }
-.eq-lbl { font-size: 10px; font-weight: bold; letter-spacing: 1px; }
-.eq-frq { font-size: 8px; letter-spacing: .5px; }
+.eq-lbl { font-size: 9px; color: var(--muted); letter-spacing: 1px; }
+.eq-frq { font-size: 8px; color: #333350; }
 
 /* ── Effects ── */
 .fx-grid {
@@ -531,6 +537,7 @@ body.light .logo { text-shadow: 0 0 10px rgba(0,137,184,0.35); }
 body.light .viz-wrap { background: #f4f6fb; }
 body.light .statusbar { background: #f1f3f9; }
 body.light .vu-bar { background: #d2d7e3; }
+body.light input.vslider::-webkit-slider-runnable-track { background: #dde1ec; }
 body.light input.vslider::-webkit-slider-thumb { border-color: #fff; }
 body.light .file-btn { color: #fff; }
 body.light .cap-start, body.light .mode-btn.active { color: #fff; }
@@ -941,28 +948,17 @@ const EQ_DEFS = [
   { l:'TREBLE', f:'12kHz'  },
 ];
 
-// Gradient color per band: deep/strong (SUB) → lighter (TREBLE), kept visible
-function eqBandColor(i, n) {
-  const t = n > 1 ? i / (n - 1) : 0;     // 0..1
-  const light = 42 + t * 16;             // 42% (deep) → 58% (still rich)
-  const sat   = 100 - t * 18;            // 100% → 82%
-  return `hsl(193, ${sat}%, ${light}%)`;
-}
-
 const eqContainer = document.getElementById('eqBands');
 EQ_DEFS.forEach((d, i) => {
   const el = document.createElement('div');
   el.className = 'eq-band';
-  const col = eqBandColor(i, EQ_DEFS.length);
-  const t   = EQ_DEFS.length > 1 ? i / (EQ_DEFS.length - 1) : 0;
-  const glow = (13 - t * 10).toFixed(1) + 'px';   // deep bands glow strong → pale bands soft
   el.innerHTML = `
-    <div class="eq-db" id="eqDb${i}" style="color:${col}">0 dB</div>
+    <div class="eq-db" id="eqDb${i}">0 dB</div>
     <div class="eq-slider-wrap">
-      <input type="range" class="vslider" id="eq${i}" min="-12" max="12" value="0" step="0.5" style="--thumb:${col};--glow:${glow}">
+      <input type="range" class="vslider" id="eq${i}" min="-12" max="12" value="0" step="0.5">
     </div>
-    <div class="eq-lbl" style="color:${col}">${d.l}</div>
-    <div class="eq-frq" style="color:${col};opacity:.72">${d.f}</div>
+    <div class="eq-lbl">${d.l}</div>
+    <div class="eq-frq">${d.f}</div>
   `;
   eqContainer.appendChild(el);
   el.querySelector(`#eq${i}`).addEventListener('input', e => {
