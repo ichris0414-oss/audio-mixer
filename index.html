@@ -284,7 +284,7 @@ input.vslider::-webkit-slider-thumb {
   width: 18px; height: 18px;
   background: var(--thumb, var(--cyan)); border-radius: 50%;
   border: 2px solid #fff;
-  box-shadow: 0 0 8px var(--thumb, var(--cyan));
+  box-shadow: 0 0 var(--glow, 8px) var(--thumb, var(--cyan));
 }
 .eq-lbl { font-size: 9px; color: var(--muted); letter-spacing: 1px; }
 .eq-frq { font-size: 8px; color: #333350; }
@@ -948,12 +948,12 @@ const EQ_DEFS = [
   { l:'TREBLE', f:'12kHz'  },
 ];
 
-// Gradient color per band: deep/strong (SUB) → light/faint (TREBLE)
+// Gradient color per band: deep/strong (SUB) → pale/faint (TREBLE)
 function eqBandColor(i, n) {
   const t = n > 1 ? i / (n - 1) : 0;     // 0..1
-  const light = 47 + t * 27;             // 47% → 74%
-  const sat   = 100 - t * 32;            // 100% → 68%
-  return `hsl(190, ${sat}%, ${light}%)`;
+  const light = 40 + t * 48;             // 40% (deep) → 88% (pale)
+  const sat   = 100 - t * 55;            // 100% → 45%
+  return `hsl(193, ${sat}%, ${light}%)`;
 }
 
 const eqContainer = document.getElementById('eqBands');
@@ -961,10 +961,12 @@ EQ_DEFS.forEach((d, i) => {
   const el = document.createElement('div');
   el.className = 'eq-band';
   const col = eqBandColor(i, EQ_DEFS.length);
+  const t   = EQ_DEFS.length > 1 ? i / (EQ_DEFS.length - 1) : 0;
+  const glow = (13 - t * 10).toFixed(1) + 'px';   // deep bands glow strong → pale bands soft
   el.innerHTML = `
     <div class="eq-db" id="eqDb${i}" style="color:${col}">0 dB</div>
     <div class="eq-slider-wrap">
-      <input type="range" class="vslider" id="eq${i}" min="-12" max="12" value="0" step="0.5" style="--thumb:${col}">
+      <input type="range" class="vslider" id="eq${i}" min="-12" max="12" value="0" step="0.5" style="--thumb:${col};--glow:${glow}">
     </div>
     <div class="eq-lbl">${d.l}</div>
     <div class="eq-frq">${d.f}</div>
