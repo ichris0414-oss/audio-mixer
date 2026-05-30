@@ -259,19 +259,12 @@ body[data-mode="live"] .file-only { display: none !important; }
   height: 120px;
   display: flex; align-items: center; justify-content: center;
 }
-.eq-slider-wrap::before {
-  content: '';
-  position: absolute;
-  left: 50%; transform: translateX(-50%);
-  width: 1px; height: 100%;
-  background: var(--border);
-}
 input.vslider {
   writing-mode: vertical-lr;
   direction: rtl;
   -webkit-appearance: slider-vertical;
   appearance: slider-vertical;
-  width: 28px; height: 110px;
+  width: 28px; height: 120px;
   cursor: pointer; background: transparent; outline: none;
 }
 input.vslider::-webkit-slider-runnable-track {
@@ -951,8 +944,8 @@ const EQ_DEFS = [
 // Gradient color per band: deep/strong (SUB) → lighter (TREBLE), kept visible
 function eqBandColor(i, n) {
   const t = n > 1 ? i / (n - 1) : 0;     // 0..1
-  const light = 45 + t * 27;             // 45% (deep) → 72% (light)
-  const sat   = 100 - t * 42;            // 100% → 58%
+  const light = 42 + t * 16;             // 42% (deep) → 58% (still rich)
+  const sat   = 100 - t * 18;            // 100% → 82%
   return `hsl(193, ${sat}%, ${light}%)`;
 }
 
