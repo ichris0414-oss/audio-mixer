@@ -275,9 +275,10 @@ input.vslider {
   cursor: pointer; background: transparent; outline: none;
 }
 input.vslider::-webkit-slider-runnable-track {
-  width: 3px;
-  background: var(--panel2);
-  border-radius: 2px;
+  width: 5px;
+  background: var(--thumb, var(--cyan));
+  border-radius: 3px;
+  box-shadow: 0 0 6px var(--thumb, var(--cyan));
 }
 input.vslider::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -286,8 +287,8 @@ input.vslider::-webkit-slider-thumb {
   border: 2px solid #fff;
   box-shadow: 0 0 var(--glow, 8px) var(--thumb, var(--cyan));
 }
-.eq-lbl { font-size: 9px; color: var(--muted); letter-spacing: 1px; }
-.eq-frq { font-size: 8px; color: #333350; }
+.eq-lbl { font-size: 10px; font-weight: bold; letter-spacing: 1px; }
+.eq-frq { font-size: 8px; letter-spacing: .5px; }
 
 /* ── Effects ── */
 .fx-grid {
@@ -537,7 +538,6 @@ body.light .logo { text-shadow: 0 0 10px rgba(0,137,184,0.35); }
 body.light .viz-wrap { background: #f4f6fb; }
 body.light .statusbar { background: #f1f3f9; }
 body.light .vu-bar { background: #d2d7e3; }
-body.light input.vslider::-webkit-slider-runnable-track { background: #dde1ec; }
 body.light input.vslider::-webkit-slider-thumb { border-color: #fff; }
 body.light .file-btn { color: #fff; }
 body.light .cap-start, body.light .mode-btn.active { color: #fff; }
@@ -948,11 +948,11 @@ const EQ_DEFS = [
   { l:'TREBLE', f:'12kHz'  },
 ];
 
-// Gradient color per band: deep/strong (SUB) → pale/faint (TREBLE)
+// Gradient color per band: deep/strong (SUB) → lighter (TREBLE), kept visible
 function eqBandColor(i, n) {
   const t = n > 1 ? i / (n - 1) : 0;     // 0..1
-  const light = 40 + t * 48;             // 40% (deep) → 88% (pale)
-  const sat   = 100 - t * 55;            // 100% → 45%
+  const light = 45 + t * 27;             // 45% (deep) → 72% (light)
+  const sat   = 100 - t * 42;            // 100% → 58%
   return `hsl(193, ${sat}%, ${light}%)`;
 }
 
@@ -968,8 +968,8 @@ EQ_DEFS.forEach((d, i) => {
     <div class="eq-slider-wrap">
       <input type="range" class="vslider" id="eq${i}" min="-12" max="12" value="0" step="0.5" style="--thumb:${col};--glow:${glow}">
     </div>
-    <div class="eq-lbl">${d.l}</div>
-    <div class="eq-frq">${d.f}</div>
+    <div class="eq-lbl" style="color:${col}">${d.l}</div>
+    <div class="eq-frq" style="color:${col};opacity:.72">${d.f}</div>
   `;
   eqContainer.appendChild(el);
   el.querySelector(`#eq${i}`).addEventListener('input', e => {
