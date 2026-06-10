@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BACKROOMS — Level 0 Simulator</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 5;
+    background: radial-gradient(ellipse at center,
+      rgba(0,0,0,0) 55%, rgba(10,8,2,0.55) 100%);
+  }
+
+  #overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(8, 7, 2, 0.93);
+    color: #d8c58f;
+    font-family: 'Courier New', monospace;
+    cursor: pointer;
+    user-select: none;
+    text-align: center;
+  }
+  #overlay h1 {
+    font-size: 2.4rem; letter-spacing: 0.45em; font-weight: normal;
+    color: #e8d5a3; text-shadow: 0 0 24px rgba(232, 213, 163, 0.25);
+    margin-bottom: 0.4em;
+  }
+  #overlay .sub { font-size: 0.85rem; letter-spacing: 0.3em; color: #8a7a55; margin-bottom: 3em; }
+  #overlay .keys { font-size: 0.8rem; line-height: 2; color: #b8a87a; margin-bottom: 3em; }
+  #overlay .keys b { color: #e8d5a3; }
+  #overlay .enter {
+    font-size: 0.95rem; letter-spacing: 0.25em; color: #e8d5a3;
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  #overlay .warn {
+    position: absolute; bottom: 6vh; font-size: 0.7rem; letter-spacing: 0.2em;
+    color: #5a4f38;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
+</style>
+</head>
+<body>
+<div id="vignette"></div>
+<div id="overlay">
+  <h1>THE BACKROOMS</h1>
+  <div class="sub">LEVEL 0 — PROCEDURAL SIMULATION</div>
+  <div class="keys">
+    <b>W A S D</b> &nbsp;이동 &nbsp;&nbsp;|&nbsp;&nbsp; <b>마우스</b> &nbsp;시점 &nbsp;&nbsp;|&nbsp;&nbsp;
+    <b>SHIFT</b> &nbsp;달리기 &nbsp;&nbsp;|&nbsp;&nbsp; <b>ESC</b> &nbsp;일시정지<br>
+    헤드폰 착용을 권장합니다
+  </div>
+  <div class="enter">[ 클릭하여 진입 ]</div>
+  <div class="warn">당신은 이곳에 와 본 적이 있습니다.</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+
+/* ============================================================
+   THE BACKROOMS — Level 0 Simulator
+   - Deterministic infinite world: every cell is derived from a
+     spatial hash, so the same place always looks the same.
+   - Chunk streaming: 3x3 chunks around the player, recycled
+     as the player moves. Fog hides the boundary.
+   - "Wrongness" layer: probabilistic anomalies (sealed doors,
+     clipped furniture, rotated carpet UVs, off-axis walls,
+     ceiling height shifts, dead fixtures, duplicated objects).
+   ============================================================ */
+
+// ---------- deterministic hash / noise ----------
+const SEED = 1991;
+function hash(x, z, s) {
+  let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(z | 0, 0x165667b1)
+        ^ Math.imul((s + SEED) | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function vnoise(x, z, s) {
+  const xi = Math.floor(x), zi = Math.floor(z);
+  const xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  const a = hash(xi, zi, s), b = hash(xi + 1, zi, s);
+  const c = hash(xi, zi + 1, s), d = hash(xi + 1, zi + 1, s);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+
+// ---------- world constants ----------
+const CELL = 4;                 // one grid cell = 4 units (corridor width ~3.7)
+const CHUNK_CELLS = 8;          // 8x8 cells per chunk
+const CHUNK = CELL * CHUNK_CELLS;
+const WALL_H = 4.0;             // structural wall height (hidden above ceiling)
+const BASE_CEIL = 3.0;
+const PLAYER_H = 1.7;
+const PLAYER_R = 0.32;
+
+// ---------- world query functions (pure, deterministic) ----------
+function openness(wx, wz) {
+  // high = open room area, low = dense maze
+  return vnoise(wx * 0.16 + 50.7, wz * 0.16 + 13.3, 5);
+}
+function wallAt(wx, wz, dir) {
+  // dir 0: edge at x=(wx+1)*CELL, dir 1: edge at z=(wz+1)*CELL
+  const o = (openness(wx, wz) + openness(wx + (dir === 0 ? 1 : 0), wz + (dir === 1 ? 1 : 0))) / 2;
+  const p = o > 0.62 ? 0.06 : (o < 0.40 ? 0.50 : 0.28);
+  return hash(wx, wz, 100 + dir) < p;
+}
+function ceilH(wx, wz) {
+  // 8% of cells: ceiling drops or rises by 0.3–0.8 mid-space
+  if (hash(wx, wz, 120) < 0.08) {
+    const sign = hash(wx, wz, 121) < 0.6 ? -1 : 1;
+    return BASE_CEIL + sign * (0.3 + hash(wx, wz, 122) * 0.5);
+  }
+  return BASE_CEIL;
+}
+function silenceZone(x, z) {
+  return hash(Math.floor(x / (CELL * 6)), Math.floor(z / (CELL * 6)), 130) < 0.13;
+}
+
+// ---------- renderer / scene ----------
+const scene = new THREE.Scene();
+const FOG_COLOR = 0x141008;
+scene.background = new THREE.Color(FOG_COLOR);
+scene.fog = new THREE.Fog(FOG_COLOR, 5, 26);
+
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 60);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// faint bounce light only — every visible light source is a fixture
+scene.add(new THREE.AmbientLight(0x8a7a55, 0.35));
+scene.add(new THREE.HemisphereLight(0xfff5cc, 0x3a3020, 0.22));
+
+// ---------- procedural textures ----------
+function canvasTex(size, draw) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  draw(ctx, size);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+const wallTex = canvasTex(256, (ctx, s) => {
+  ctx.fillStyle = '#E8D5A3';
+  ctx.fillRect(0, 0, s, s);
+  // faint horizontal brush strokes — painted, not tiled
+  for (let i = 0; i < 340; i++) {
+    const y = Math.random() * s, w = 30 + Math.random() * 140;
+    ctx.fillStyle = Math.random() < 0.5 ? 'rgba(120,100,60,0.045)' : 'rgba(255,245,210,0.05)';
+    ctx.fillRect(Math.random() * s, y, w, 1 + Math.random() * 2);
+  }
+  for (let i = 0; i < 900; i++) {
+    ctx.fillStyle = `rgba(90,75,45,${Math.random() * 0.05})`;
+    ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2);
+  }
+});
+wallTex.repeat.set(2, 1);
+
+const carpetTex = canvasTex(256, (ctx, s) => {
+  ctx.fillStyle = '#C4A882';
+  ctx.fillRect(0, 0, s, s);
+  // directional grain (vertical strokes; direction changes per room via instance rotation)
+  for (let i = 0; i < 2400; i++) {
+    const x = Math.random() * s, y = Math.random() * s;
+    ctx.fillStyle = Math.random() < 0.55 ? 'rgba(80,62,38,0.10)' : 'rgba(225,205,160,0.08)';
+    ctx.fillRect(x, y, 1, 3 + Math.random() * 6);
+  }
+  // fake dirt accumulation — darker edges
+  const g = ctx.createRadialGradient(s / 2, s / 2, s * 0.30, s / 2, s / 2, s * 0.72);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(40,30,15,0.22)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+});
+
+const ceilTex = canvasTex(256, (ctx, s) => {
+  ctx.fillStyle = '#F0E6C8';
+  ctx.fillRect(0, 0, s, s);
+  ctx.strokeStyle = 'rgba(120,105,70,0.10)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i <= 2; i++) {
+    ctx.beginPath(); ctx.moveTo(i * s / 2, 0); ctx.lineTo(i * s / 2, s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * s / 2); ctx.lineTo(s, i * s / 2); ctx.stroke();
+  }
+  for (let i = 0; i < 700; i++) {
+    ctx.fillStyle = `rgba(110,95,60,${Math.random() * 0.05})`;
+    ctx.fillRect(Math.random() * s, Math.random() * s, 2, 2);
+  }
+});
+
+// ---------- materials ----------
+const wallMat   = new THREE.MeshLambertMaterial({ map: wallTex });
+const carpetMat = new THREE.MeshLambertMaterial({ map: carpetTex });
+const ceilMat   = new THREE.MeshLambertMaterial({ map: ceilTex });
+const trimMat   = new THREE.MeshLambertMaterial({ color: 0xB8997A });
+const fixLitMat  = new THREE.MeshBasicMaterial({ color: 0xFFF5CC });
+const fixDarkMat = new THREE.MeshLambertMaterial({ color: 0x4a463c });
+const propMat   = new THREE.MeshLambertMaterial({ vertexColors: true });
+
+// ---------- shared geometries ----------
+function jitterInterior(geo, amp) {
+  // perlin-ish surface imperfection; borders stay flush so tiles meet cleanly
+  const pos = geo.attributes.position;
+  const hw = CELL / 2 - 0.01;
+  for (let i = 0; i < pos.count; i++) {
+    if (Math.abs(pos.getX(i)) < hw && Math.abs(pos.getY(i)) < hw) {
+      const n = vnoise(pos.getX(i) * 3.1 + 9, pos.getY(i) * 3.1 + 7, 99);
+      pos.setZ(i, (n - 0.5) * 0.03);
+    }
+  }
+  geo.computeVertexNormals();
+}
+
+const floorGeo = new THREE.PlaneGeometry(CELL, CELL, 4, 4);
+jitterInterior(floorGeo, 0.02);
+floorGeo.rotateX(-Math.PI / 2);
+
+const ceilGeo = new THREE.PlaneGeometry(CELL, CELL, 4, 4);
+jitterInterior(ceilGeo, 0.02);
+ceilGeo.rotateX(Math.PI / 2);
+
+const wallGeo = new THREE.BoxGeometry(CELL + 0.26, WALL_H, 0.26);
+wallGeo.translate(0, WALL_H / 2, 0);
+
+const trimGeo = new THREE.BoxGeometry(CELL + 0.3, 0.16, 0.34);
+trimGeo.translate(0, 0.08, 0);
+
+const pillarGeo = new THREE.BoxGeometry(0.6, WALL_H, 0.6);
+pillarGeo.translate(0, WALL_H / 2, 0);
+
+const fasciaGeo = new THREE.BoxGeometry(1, 1, 1); // scaled per instance
+const fixtureGeo = new THREE.BoxGeometry(1.25, 0.07, 0.34);
+
+// ---------- merged vertex-colored prop geometries ----------
+function coloredPart(geo, color, x, y, z, ry = 0) {
+  if (ry) geo.rotateY(ry);
+  geo.translate(x, y, z);
+  const c = new THREE.Color(color);
+  const n = geo.attributes.position.count;
+  const arr = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { arr[i * 3] = c.r; arr[i * 3 + 1] = c.g; arr[i * 3 + 2] = c.b; }
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  return geo;
+}
+const box = (w, h, d, c, x, y, z, ry) => coloredPart(new THREE.BoxGeometry(w, h, d), c, x, y, z, ry);
+const cyl = (rt, rb, h, c, x, y, z) => coloredPart(new THREE.CylinderGeometry(rt, rb, h, 10), c, x, y, z);
+const merge = parts => BufferGeometryUtils.mergeGeometries(parts, false);
+
+// office chair
+const chairGeo = merge([
+  box(0.46, 0.07, 0.46, 0x3a3a3e, 0, 0.46, 0),
+  box(0.46, 0.52, 0.06, 0x3a3a3e, 0, 0.78, -0.21),
+  cyl(0.035, 0.035, 0.42, 0x55555a, 0, 0.24, 0),
+  cyl(0.26, 0.29, 0.05, 0x44444a, 0, 0.03, 0),
+]);
+// filing cabinet (drawer lines as thin dark strips)
+const cabGeo = merge([
+  box(0.52, 1.32, 0.64, 0x8a8578, 0, 0.66, 0),
+  box(0.46, 0.025, 0.02, 0x55524a, 0, 0.34, 0.33),
+  box(0.46, 0.025, 0.02, 0x55524a, 0, 0.66, 0.33),
+  box(0.46, 0.025, 0.02, 0x55524a, 0, 0.98, 0.33),
+  box(0.16, 0.03, 0.03, 0x4a473f, 0, 0.46, 0.34),
+  box(0.16, 0.03, 0.03, 0x4a473f, 0, 0.78, 0.34),
+  box(0.16, 0.03, 0.03, 0x4a473f, 0, 1.10, 0.34),
+]);
+// cardboard box (slightly irregular)
+const cboxGeo = merge([
+  box(0.52, 0.40, 0.46, 0xa08456, 0, 0.20, 0, 0.04),
+  box(0.54, 0.02, 0.20, 0x8f7448, 0, 0.41, 0.10, 0.04),
+]);
+// empty water cooler
+const coolerGeo = merge([
+  box(0.36, 1.00, 0.36, 0xd8d8d0, 0, 0.50, 0),
+  cyl(0.15, 0.13, 0.36, 0xc2d4dc, 0, 1.20, 0),
+  box(0.06, 0.05, 0.08, 0x9aa4aa, 0.10, 0.86, 0.20),
+]);
+// sealed doorframe — a frame and a slab pressed against solid wall
+const doorGeo = merge([
+  box(0.12, 2.16, 0.34, 0xB8997A, -0.53, 1.08, 0),
+  box(0.12, 2.16, 0.34, 0xB8997A,  0.53, 1.08, 0),
+  box(1.18, 0.12, 0.34, 0xB8997A,  0, 2.20, 0),
+  box(0.94, 2.10, 0.32, 0xD8C595,  0, 1.05, 0),
+]);
+
+const PROPS = {
+  chair:  { geo: chairGeo,  half: { x: 0.30, z: 0.30 } },
+  cab:    { geo: cabGeo,    half: { x: 0.28, z: 0.34 } },
+  cbox:   { geo: cboxGeo,   half: { x: 0.28, z: 0.25 } },
+  cooler: { geo: coolerGeo, half: { x: 0.20, z: 0.20 } },
+};
+
+// ---------- chunk ----------
+const dummy = new THREE.Object3D();
+function instanced(geo, mat, list, setFn) {
+  if (!list.length) return null;
+  const m = new THREE.InstancedMesh(geo, mat, list.length);
+  list.forEach((it, k) => {
+    dummy.position.set(0, 0, 0); dummy.rotation.set(0, 0, 0); dummy.scale.set(1, 1, 1);
+    setFn(dummy, it);
+    dummy.updateMatrix();
+    m.setMatrixAt(k, dummy.matrix);
+  });
+  m.instanceMatrix.needsUpdate = true;
+  m.frustumCulled = false; // chunks are always near the player
+  return m;
+}
+const boxC = (x, z, hx, hz) => ({ x0: x - hx, x1: x + hx, z0: z - hz, z1: z + hz });
+const deg = THREE.MathUtils.degToRad;
+
+class Chunk {
+  constructor(cx, cz) {
+    this.group = new THREE.Group();
+    this.colliders = [];
+    this.fixtures = [];   // { x,y,z, lit, flicker, freq, phase, idx }
+    this.flickers = [];
+    this.fixLitMesh = null;
+
+    const walls = [], doors = [], pillars = [], fascias = [];
+    const floors = [], ceils = [], fixLit = [], fixDark = [];
+    const props = { chair: [], cab: [], cbox: [], cooler: [] };
+    const x0 = cx * CHUNK_CELLS, z0 = cz * CHUNK_CELLS;
+
+    for (let i = 0; i < CHUNK_CELLS; i++) for (let j = 0; j < CHUNK_CELLS; j++) {
+      const wx = x0 + i, wz = z0 + j;
+      const ccx = wx * CELL + CELL / 2, ccz = wz * CELL + CELL / 2;
+      const ch = ceilH(wx, wz);
+      const open = openness(wx, wz);
+
+      // --- floor: grain direction per room region; 12% tiles rotated 90° wrong ---
+      const regionRot = hash(Math.floor(wx / 5), Math.floor(wz / 5), 140) < 0.5 ? 0 : Math.PI / 2;
+      const wrongUV = hash(wx, wz, 141) < 0.12 ? Math.PI / 2 : 0;
+      floors.push({ x: ccx, z: ccz, ry: regionRot + wrongUV });
+
+      // --- ceiling at per-cell height, fascia where heights differ ---
+      ceils.push({ x: ccx, z: ccz, y: ch });
+      const hx = ceilH(wx + 1, wz);
+      if (Math.abs(hx - ch) > 0.01)
+        fascias.push({ x: (wx + 1) * CELL, z: ccz, y: (hx + ch) / 2, h: Math.abs(hx - ch) + 0.06, ry: Math.PI / 2 });
+      const hz = ceilH(wx, wz + 1);
+      if (Math.abs(hz - ch) > 0.01)
+        fascias.push({ x: ccx, z: (wz + 1) * CELL, y: (hz + ch) / 2, h: Math.abs(hz - ch) + 0.06, ry: 0 });
+
+      // --- walls on +x / +z edges ---
+      for (let dir = 0; dir < 2; dir++) {
+        if (!wallAt(wx, wz, dir)) continue;
+        const wpx = dir === 0 ? (wx + 1) * CELL : ccx;
+        const wpz = dir === 0 ? ccz : (wz + 1) * CELL;
+        let ry = dir === 0 ? Math.PI / 2 : 0;
+        // 5%: very slight off-axis tilt (2–5°) — disorienting, hard to notice
+        let tilted = 0;
+        if (hash(wx, wz, 150 + dir) < 0.05) {
+          tilted = (hash(wx, wz, 152 + dir) < 0.5 ? -1 : 1) * deg(2 + hash(wx, wz, 154 + dir) * 3);
+          ry += tilted;
+        }
+        walls.push({ x: wpx, z: wpz, ry });
+        const m = 0.14 + (tilted ? 0.18 : 0);
+        this.colliders.push(dir === 0 ? boxC(wpx, wpz, m, CELL / 2) : boxC(wpx, wpz, CELL / 2, m));
+        // 10%: sealed door — frame that leads into solid wall
+        if (hash(wx, wz, 160 + dir) < 0.10)
+          doors.push({ x: wpx, z: wpz, ry: dir === 0 ? Math.PI / 2 : 0 });
+      }
+
+      // --- pillars in open areas (classic Level 0) ---
+      if (open > 0.55 && hash(wx, wz, 170) < 0.05) {
+        pillars.push({ x: wx * CELL, z: wz * CELL });
+        this.colliders.push(boxC(wx * CELL, wz * CELL, 0.32, 0.32));
+      }
+
+      // --- light fixtures: 20% dead, 3% flickering ---
+      const fprob = 0.10 + 0.10 * open;
+      if (hash(wx, wz, 180) < fprob) {
+        const lit = hash(wx, wz, 181) >= 0.20;
+        const fx = {
+          x: ccx, y: ch - 0.07, z: ccz, lit,
+          flicker: lit && hash(wx, wz, 182) < 0.03,
+          freq: 0.3 + hash(wx, wz, 183) * 1.7,
+          phase: hash(wx, wz, 184) * 6.283,
+          idx: -1,
+        };
+        this.fixtures.push(fx);
+        if (lit) {
+          fx.idx = fixLit.length;
+          fixLit.push(fx);
+          if (fx.flicker) this.flickers.push(fx);
+        } else fixDark.push(fx);
+      }
+
+      // --- furniture: rooms only, purposeless placement ---
+      if (open > 0.52 && hash(wx, wz, 190) < 0.16)
+        this.placeProp(wx, wz, ccx, ccz, props);
+    }
+
+    const add = m => { if (m) this.group.add(m); };
+    add(instanced(floorGeo, carpetMat, floors, (d, it) => { d.position.set(it.x, 0, it.z); d.rotation.y = it.ry; }));
+    add(instanced(ceilGeo, ceilMat, ceils, (d, it) => { d.position.set(it.x, it.y, it.z); }));
+    add(instanced(fasciaGeo, ceilMat, fascias, (d, it) => { d.position.set(it.x, it.y, it.z); d.rotation.y = it.ry; d.scale.set(CELL, it.h, 0.12); }));
+    add(instanced(wallGeo, wallMat, walls, (d, it) => { d.position.set(it.x, 0, it.z); d.rotation.y = it.ry; }));
+    add(instanced(trimGeo, trimMat, walls, (d, it) => { d.position.set(it.x, 0, it.z); d.rotation.y = it.ry; }));
+    add(instanced(pillarGeo, wallMat, pillars, (d, it) => { d.position.set(it.x, 0, it.z); }));
+    add(instanced(doorGeo, propMat, doors, (d, it) => { d.position.set(it.x, 0, it.z); d.rotation.y = it.ry; }));
+    add(instanced(fixtureGeo, fixDarkMat, fixDark, (d, it) => { d.position.set(it.x, it.y, it.z); }));
+    this.fixLitMesh = instanced(fixtureGeo, fixLitMat, fixLit, (d, it) => { d.position.set(it.x, it.y, it.z); });
+    if (this.fixLitMesh) {
+      const white = new THREE.Color(1, 1, 1);
+      for (let k = 0; k < fixLit.length; k++) this.fixLitMesh.setColorAt(k, white);
+      this.fixLitMesh.instanceColor.needsUpdate = true;
+      this.group.add(this.fixLitMesh);
+    }
+    for (const key of Object.keys(props))
+      add(instanced(PROPS[key].geo, propMat, props[key],
+        (d, it) => { d.position.set(it.x, it.y, it.z); d.rotation.y = it.ry; d.scale.setScalar(it.s); }));
+
+    scene.add(this.group);
+  }
+
+  placeProp(wx, wz, ccx, ccz, props) {
+    const tH = hash(wx, wz, 191);
+    const key = tH < 0.30 ? 'chair' : tH < 0.55 ? 'cab' : tH < 0.80 ? 'cbox' : 'cooler';
+    const half = PROPS[key].half;
+    let px = ccx + (hash(wx, wz, 192) - 0.5) * 2.2;
+    let pz = ccz + (hash(wx, wz, 193) - 0.5) * 2.2;
+    let py = 0;
+    const s = 0.85 + hash(wx, wz, 194) * 0.30;          // ±15% scale
+    let ry = Math.floor(hash(wx, wz, 195) * 4) * Math.PI / 2;
+    if (hash(wx, wz, 196) < 0.10)                        // 10%: 3–17° off-axis
+      ry += (hash(wx, wz, 198) < 0.5 ? -1 : 1) * deg(3 + hash(wx, wz, 197) * 14);
+    if (hash(wx, wz, 199) < 0.15) {                      // 15%: clips into wall or floor
+      if (hash(wx, wz, 201) < 0.35) py = -0.10;          // sunk into the carpet
+      else if (wallAt(wx, wz, 0)) px = (wx + 1) * CELL - half.x * s * 0.5;
+      else if (wallAt(wx, wz, 1)) pz = (wz + 1) * CELL - half.z * s * 0.5;
+      else py = -0.10;
+    }
+    props[key].push({ x: px, y: py, z: pz, ry, s });
+    this.colliders.push(boxC(px, pz, half.x * s + 0.05, half.z * s + 0.05));
+    if (hash(wx, wz, 200) < 0.10) {                      // 10%: same object twice, offset
+      const px2 = px + 0.34, pz2 = pz + 0.26;
+      props[key].push({ x: px2, y: py, z: pz2, ry, s });
+      this.colliders.push(boxC(px2, pz2, half.x * s + 0.05, half.z * s + 0.05));
+    }
+  }
+
+  dispose() {
+    scene.remove(this.group);
+    this.group.traverse(o => { if (o.isInstancedMesh) o.dispose(); });
+  }
+}
+
+// ---------- chunk streaming ----------
+const chunks = new Map();
+function updateChunks(px, pz) {
+  const ccx = Math.floor(px / CHUNK), ccz = Math.floor(pz / CHUNK);
+  const need = new Set();
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
+    need.add((ccx + dx) + ',' + (ccz + dz));
+  for (const k of need) if (!chunks.has(k)) {
+    const [cx, cz] = k.split(',').map(Number);
+    chunks.set(k, new Chunk(cx, cz));
+  }
+  for (const [k, ch] of chunks) if (!need.has(k)) { ch.dispose(); chunks.delete(k); }
+}
+
+// ---------- lighting pool (real lights follow nearest lit fixtures) ----------
+const POOL = 6;
+const lightPool = [];
+for (let i = 0; i < POOL; i++) {
+  const L = new THREE.PointLight(0xFFF5CC, 26, 15, 1.7);
+  L.visible = false;
+  scene.add(L);
+  lightPool.push(L);
+}
+function flickerVal(t, f) {
+  const s = Math.sin(t * f.freq * 6.283 + f.phase) * Math.sin(t * f.freq * 4.31 * 6.283 + f.phase * 2.1);
+  return Math.max(0.06, 0.55 + 0.55 * s);
+}
+const tmpColor = new THREE.Color();
+let assignTimer = 0;
+function nearestLitFixtures(px, pz, maxD, n) {
+  const out = [];
+  chunks.forEach(ch => {
+    for (const f of ch.fixtures) {
+      if (!f.lit) continue;
+      const d2 = (f.x - px) ** 2 + (f.z - pz) ** 2;
+      if (d2 < maxD * maxD) out.push({ f, d2, ch });
+    }
+  });
+  out.sort((a, b) => a.d2 - b.d2);
+  return out.slice(0, n);
+}
+function updateLights(t, dt, px, pz) {
+  assignTimer -= dt;
+  if (assignTimer <= 0) {
+    assignTimer = 0.35;
+    const cands = nearestLitFixtures(px, pz, 17, POOL);
+    for (let i = 0; i < POOL; i++) {
+      const L = lightPool[i];
+      if (i < cands.length) {
+        const f = cands[i].f;
+        L.visible = true;
+        L.position.set(f.x, f.y - 0.18, f.z);
+        L.userData.f = f;
+      } else { L.visible = false; L.userData.f = null; }
+    }
+    updateHumTargets(cands);
+  }
+  for (const L of lightPool) {
+    const f = L.userData.f;
+    if (f) L.intensity = 26 * (f.flicker ? flickerVal(t, f) : 1);
+  }
+  chunks.forEach(ch => {
+    if (!ch.flickers.length || !ch.fixLitMesh) return;
+    for (const f of ch.flickers) {
+      const v = flickerVal(t, f);
+      ch.fixLitMesh.setColorAt(f.idx, tmpColor.setScalar(0.12 + 0.88 * v));
+    }
+    ch.fixLitMesh.instanceColor.needsUpdate = true;
+  });
+}
+
+// ---------- audio (Web Audio API only) ----------
+let AC = null, zoneGain = null, stepBuf = null;
+const humVoices = [];
+let stepSide = 1;
+
+function initAudio() {
+  if (AC) return;
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  const master = AC.createGain();
+  master.gain.value = 0.9;
+  master.connect(AC.destination);
+  zoneGain = AC.createGain();          // silence zones duck everything by 80%
+  zoneGain.gain.value = 1;
+  zoneGain.connect(master);
+
+  // distant non-positional drone — frequency drifts over minutes
+  const droneGain = AC.createGain(); droneGain.gain.value = 0.05;
+  const droneLP = AC.createBiquadFilter(); droneLP.type = 'lowpass'; droneLP.frequency.value = 130;
+  droneLP.connect(droneGain); droneGain.connect(zoneGain);
+  const d1 = AC.createOscillator(); d1.type = 'triangle'; d1.frequency.value = 36;
+  const d2 = AC.createOscillator(); d2.type = 'triangle'; d2.frequency.value = 54.3;
+  d1.connect(droneLP); d2.connect(droneLP);
+  const lfo1 = AC.createOscillator(); lfo1.frequency.value = 1 / 240;
+  const lfo1G = AC.createGain(); lfo1G.gain.value = 5;
+  lfo1.connect(lfo1G); lfo1G.connect(d1.frequency);
+  const lfo2 = AC.createOscillator(); lfo2.frequency.value = 1 / 170;
+  const lfo2G = AC.createGain(); lfo2G.gain.value = 7;
+  lfo2.connect(lfo2G); lfo2G.connect(d2.frequency);
+  d1.start(); d2.start(); lfo1.start(); lfo2.start();
+
+  // positional fluorescent hum voices — 60Hz base + harmonics, slight drift
+  for (let i = 0; i < 5; i++) {
+    const pan = AC.createPanner();
+    pan.panningModel = 'equalpower';
+    pan.distanceModel = 'inverse';
+    pan.refDistance = 1.6;
+    pan.rolloffFactor = 1.6;
+    pan.maxDistance = 30;
+    const g = AC.createGain(); g.gain.value = 0;
+    const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2600;
+    const mk = (type, freq, vol) => {
+      const o = AC.createOscillator(); o.type = type; o.frequency.value = freq;
+      const og = AC.createGain(); og.gain.value = vol;
+      o.connect(og); og.connect(lp); o.start();
+      return o;
+    };
+    mk('sine', 60, 0.50);
+    mk('sine', 120, 0.22);
+    const buzz = mk('sawtooth', 180, 0.05);
+    lp.connect(g); g.connect(pan); pan.connect(zoneGain);
+    setInterval(() => {
+      if (AC) buzz.detune.setTargetAtTime((Math.random() * 2 - 1) * 18, AC.currentTime, 2);
+    }, 3200 + i * 740);
+    humVoices.push({ pan, g });
+  }
+
+  // footstep — muffled carpet thud
+  const sr = AC.sampleRate, len = Math.floor(sr * 0.1);
+  stepBuf = AC.createBuffer(1, len, sr);
+  const ch = stepBuf.getChannelData(0);
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    ch[i] = (Math.random() * 2 - 1) * Math.exp(-t * 45);
+  }
+}
+
+function updateHumTargets(cands) {
+  if (!AC) return;
+  const now = AC.currentTime;
+  for (let i = 0; i < humVoices.length; i++) {
+    const v = humVoices[i];
+    if (i < cands.length && cands[i].d2 < 14 * 14) {
+      const f = cands[i].f;
+      if (v.pan.positionX) {
+        v.pan.positionX.setTargetAtTime(f.x, now, 0.1);
+        v.pan.positionY.setTargetAtTime(f.y, now, 0.1);
+        v.pan.positionZ.setTargetAtTime(f.z, now, 0.1);
+      } else v.pan.setPosition(f.x, f.y, f.z);
+      v.g.gain.setTargetAtTime(0.17, now, 0.4);
+    } else {
+      v.g.gain.setTargetAtTime(0, now, 0.4);
+    }
+  }
+}
+
+function playStep(sprint) {
+  if (!AC || AC.state !== 'running') return;
+  const src = AC.createBufferSource();
+  src.buffer = stepBuf;
+  src.playbackRate.value = 0.85 + Math.random() * 0.25;
+  const f = AC.createBiquadFilter();
+  f.type = 'lowpass'; f.frequency.value = sprint ? 460 : 360; f.Q.value = 0.6;
+  const g = AC.createGain(); g.gain.value = sprint ? 0.5 : 0.32;
+  const p = AC.createStereoPanner();
+  stepSide *= -1;
+  p.pan.value = stepSide * 0.16;
+  src.connect(f); f.connect(g); g.connect(p); p.connect(zoneGain);
+  src.start();
+}
+
+let inSilence = false;
+function updateAudio(px, pz) {
+  if (!AC) return;
+  const now = AC.currentTime;
+  const lst = AC.listener;
+  const fwd = new THREE.Vector3();
+  camera.getWorldDirection(fwd);
+  if (lst.positionX) {
+    lst.positionX.value = px; lst.positionY.value = PLAYER_H; lst.positionZ.value = pz;
+    lst.forwardX.value = fwd.x; lst.forwardY.value = fwd.y; lst.forwardZ.value = fwd.z;
+    lst.upX.value = 0; lst.upY.value = 1; lst.upZ.value = 0;
+  } else {
+    lst.setPosition(px, PLAYER_H, pz);
+    lst.setOrientation(fwd.x, fwd.y, fwd.z, 0, 1, 0);
+  }
+  const z = silenceZone(px, pz);
+  if (z !== inSilence) {
+    inSilence = z;
+    zoneGain.gain.setTargetAtTime(z ? 0.2 : 1, now, 0.7); // sudden quiet is worse than sound
+  }
+}
+
+// ---------- player ----------
+const controls = new PointerLockControls(camera, document.body);
+const overlay = document.getElementById('overlay');
+overlay.addEventListener('click', () => {
+  initAudio();
+  AC.resume();
+  controls.lock();
+});
+controls.addEventListener('lock', () => { overlay.style.display = 'none'; });
+controls.addEventListener('unlock', () => { overlay.style.display = 'flex'; });
+
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+const vel = new THREE.Vector2();
+let bobPhase = 0, prevBobSin = 0;
+const euler = new THREE.Euler();
+
+function collideAxis(px, pz) {
+  // point-vs-Minkowski-expanded AABB; walls/furniture are solid. no noclip here.
+  let cx = px, cz = pz, hit = false;
+  chunks.forEach(ch => {
+    for (const c of ch.colliders) {
+      if (cx > c.x0 - PLAYER_R && cx < c.x1 + PLAYER_R &&
+          cz > c.z0 - PLAYER_R && cz < c.z1 + PLAYER_R) hit = true;
+    }
+  });
+  return hit;
+}
+
+function updatePlayer(dt) {
+  if (!controls.isLocked) { vel.set(0, 0); return; }
+  const f = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
+  const s = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+  const sprint = keys.ShiftLeft || keys.ShiftRight;
+  const speed = sprint ? 7 : 4;
+  let tx = 0, tz = 0;
+  if (f || s) {
+    euler.setFromQuaternion(camera.quaternion, 'YXZ');
+    const yaw = euler.y, len = Math.hypot(f, s);
+    const fn = f / len, sn = s / len;
+    tx = (-Math.sin(yaw) * fn + Math.cos(yaw) * sn) * speed;
+    tz = (-Math.cos(yaw) * fn - Math.sin(yaw) * sn) * speed;
+  }
+  const k = Math.min(1, dt * 11);
+  vel.x += (tx - vel.x) * k;
+  vel.y += (tz - vel.y) * k;
+
+  const pos = camera.position;
+  // axis-separated collision so the player slides along walls
+  const nx = pos.x + vel.x * dt;
+  if (!collideAxis(nx, pos.z)) pos.x = nx; else vel.x = 0;
+  const nz = pos.z + vel.y * dt;
+  if (!collideAxis(pos.x, nz)) pos.z = nz; else vel.y = 0;
+
+  // head bob synced to footsteps
+  const sp = Math.hypot(vel.x, vel.y);
+  if (sp > 0.4) {
+    bobPhase += dt * sp * 2.9;
+    const bs = Math.sin(bobPhase);
+    pos.y = PLAYER_H + bs * 0.04 * Math.min(1, sp / 4);
+    if (bs < -0.86 && prevBobSin >= -0.86) playStep(sp > 5);
+    prevBobSin = bs;
+  } else {
+    pos.y += (PLAYER_H - pos.y) * Math.min(1, dt * 6);
+    prevBobSin = 0;
+  }
+}
+
+// ---------- spawn: find an open cell with nothing in it ----------
+function findSpawn() {
+  for (let wx = 1; wx < 60; wx++) for (let wz = 1; wz < 60; wz++) {
+    const open = openness(wx, wz);
+    if (open > 0.5 &&
+        hash(wx, wz, 170) >= 0.05 &&                    // no pillar roll
+        hash(wx, wz, 190) >= 0.16 &&                    // no furniture roll
+        hash(wx, wz, 180) < 0.10 + 0.10 * open &&       // has a fixture...
+        hash(wx, wz, 181) >= 0.20)                      // ...and it is lit
+      return [wx * CELL + CELL / 2, wz * CELL + CELL / 2];
+  }
+  return [CELL * 2.5, CELL * 2.5];
+}
+const [sx, sz] = findSpawn();
+camera.position.set(sx, PLAYER_H, sz);
+updateChunks(sx, sz);
+
+// ---------- main loop ----------
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+  updatePlayer(dt);
+  const px = camera.position.x, pz = camera.position.z;
+  updateChunks(px, pz);
+  updateLights(t, dt, px, pz);
+  updateAudio(px, pz);
+  renderer.render(scene, camera);
+}
+animate();
+
+// debug handle (harmless; used by automated smoke tests)
+window.__br = { scene, camera, renderer, chunks, lightPool, nearestLitFixtures };
+</script>
+</body>
+</html>
